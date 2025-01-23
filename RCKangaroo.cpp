@@ -28,15 +28,16 @@ EcInt Int_HalfRange;
 EcPoint Pnt_HalfRange;
 EcPoint Pnt_NegHalfRange;
 EcInt Int_TameOffset;
-Ec ec;
+EcInt gPrivKey;
 
 CriticalSection csAddPoints;
+CriticalSection csDatabase; // Add new critical section for database operations
 u8* pPntList;
 u8* pPntList2;
 volatile int PntIndex;
 TFastBase db;
 EcPoint gPntToSolve;
-EcInt gPrivKey;
+Ec ec;
 
 volatile u64 TotalOps;
 u32 TotalSolved;
@@ -54,6 +55,51 @@ char gTamesFileName[1024];
 double gMax;
 bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
+
+// Global variables for auto-save functionality
+time_t gLastSaveTime = 0;
+const int AUTOSAVE_INTERVAL_SECONDS = 60; // 10 minutes
+
+bool SaveDatabase(const char* filename) {
+    if (!filename || !filename[0]) return false;
+    
+    // Create temporary filename by appending .tmp
+    char tempFilename[512];
+    snprintf(tempFilename, sizeof(tempFilename), "%s.tmp", filename);
+    
+    // Lock the database during save
+    csDatabase.Enter();
+    bool success = db.SaveToFile(tempFilename);
+    csDatabase.Leave();
+    
+    if (!success) {
+        return false;
+    }
+    
+    // Replace old file with new one
+    #ifdef _WIN32
+    // Windows requires the target file to be deleted first
+    remove(filename);
+    #endif
+    if (rename(tempFilename, filename) != 0) {
+        remove(tempFilename);
+        return false;
+    }
+    
+    return true;
+}
+
+void CheckAndAutoSave() {
+    if (!gTamesFileName[0] || IsBench || gGenMode) return;
+    
+    time_t currentTime = time(NULL);
+    if (currentTime - gLastSaveTime >= AUTOSAVE_INTERVAL_SECONDS) {
+        if (SaveDatabase(gTamesFileName)) {
+            gLastSaveTime = currentTime;
+            printf("\rDatabase auto-saved at %s", ctime(&currentTime));
+        }
+    }
+}
 
 #pragma pack(push, 1)
 struct DBRec
@@ -109,6 +155,7 @@ void InitGpus()
 		cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
 
 		GpuKangs[GpuCnt] = new RCGpuKang();
+		GpuKangs[GpuCnt]->Failed = false;
 		GpuKangs[GpuCnt]->CudaIndex = i;
 		GpuKangs[GpuCnt]->persistingL2CacheMaxSize = deviceProp.persistingL2CacheMaxSize;
 		GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
@@ -211,7 +258,11 @@ void CheckNewPoints()
 		memcpy(nrec.d, p + 16, 22);
 		nrec.type = gGenMode ? TAME : p[40];
 
+		// Lock database during modification
+		csDatabase.Enter();
 		DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
+		csDatabase.Leave();
+
 		if (gGenMode)
 			continue;
 		if (pref)
@@ -347,27 +398,27 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	double DPs_per_kang = path_single_kang / dp_val;
 	printf("Estimated DPs per kangaroo: %.3f.%s\r\n", DPs_per_kang, (DPs_per_kang < 5) ? " DP overhead is big, use less DP value if possible!" : "");
 
-	if (!gGenMode && gTamesFileName[0])
+	gPntToSolve = PntToSolve;
+	gSolved = false;
+	gIsOpsLimit = false;
+	PntTotalOps = 0;
+
+	if (!gGenMode)
 	{
-		printf("load tames...\r\n");
-		if (db.LoadFromFile(gTamesFileName))
+		//in main mode we need to load tames from file
+		if (!gTamesFileName[0])
 		{
-			printf("tames loaded\r\n");
-			printf("Range: %d bits\n", db.Header[0]);
-			printf("DP: %d\n", db.Header[1]);
-			printf("Total DPs: %llu\n", db.GetBlockCnt());
-			if (db.Header[0] != gRange)
-			{
-				printf("loaded tames have different range, they cannot be used, clear\r\n");
-				db.Clear();
-			}
+			printf("error: you must specify -tames option\r\n");
+			return false;
 		}
-		else
-			printf("tames loading failed\r\n");
+		if (!db.LoadFromFile(gTamesFileName))
+		{
+			printf("error: cannot load tames from %s\r\n", gTamesFileName);
+			return false;
+		}
 	}
 
 	SetRndSeed(0); //use same seed to make tames from file compatible
-	PntTotalOps = 0;
 	PntIndex = 0;
 //prepare jumps
 	EcInt minjump, t;
@@ -416,7 +467,6 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	tt.Set(1);
 	tt.ShiftLeft(Range - 5); //half of tame range width
 	Int_TameOffset.Sub(tt);
-	gPntToSolve = PntToSolve;
 
 //prepare GPUs
 	for (int i = 0; i < GpuCnt; i++)
@@ -452,6 +502,15 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	while (!gSolved)
 	{
 		CheckNewPoints();
+		if (gSolved)
+			break;
+		
+		// Check for auto-save
+		CheckAndAutoSave();
+
+		if (gIsOpsLimit)
+			break;
+
 		Sleep(10);
 		if (GetTickCount64() - tm_stats > 10 * 1000)
 		{
@@ -685,7 +744,7 @@ int main(int argc, char* argv[])
 	{
 		printf("\r\nMAIN MODE\r\n\r\n");
 		EcPoint PntToSolve, PntOfs;
-		EcInt pk, pk_found;
+		EcInt pk_found;
 
 		PntToSolve = gPubKey;
 		if (!gStart.IsZero())
@@ -701,6 +760,8 @@ int main(int argc, char* argv[])
 		printf("Solving public key\r\nX: %s\r\nY: %s\r\n", sx, sy);
 		gStart.GetHexStr(sx);
 		printf("Offset: %s\r\n", sx);
+
+		gLastSaveTime = time(NULL);
 
 		if (!SolvePoint(PntToSolve, gRange, gDP, &pk_found))
 		{
@@ -769,6 +830,7 @@ int main(int argc, char* argv[])
 			u64 ops_per_pnt = TotalOps / TotalSolved;
 			double K = (double)ops_per_pnt / pow(2.0, gRange / 2.0);
 			printf("Points solved: %d, average K: %.3f (with DP and GPU overheads)\r\n", TotalSolved, K);
+			CheckAndAutoSave();
 			//if (TotalSolved >= 100) break; //dbg
 		}
 	}
@@ -779,4 +841,3 @@ label_end:
 	free(pPntList2);
 	free(pPntList);
 }
-
