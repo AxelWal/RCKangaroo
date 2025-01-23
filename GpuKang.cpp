@@ -332,6 +332,23 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
     return true;
 }
 
+bool RCGpuKang::Init(int _CudaIndex)
+{
+    CudaIndex = _CudaIndex;
+    
+    cudaDeviceProp props;
+    cudaGetDeviceProperties(&props, CudaIndex);
+    
+    // Force new GPU mode for RTX 30 series
+    if (props.major >= 8 && props.minor >= 6) {
+        IsOldGpu = false;  // RTX 3070 has compute capability 8.6
+    } else {
+        IsOldGpu = true;
+    }
+    
+    return true;
+}
+
 void RCGpuKang::Release()
 {
     free(RndPnts);
