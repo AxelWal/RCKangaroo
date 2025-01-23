@@ -58,7 +58,7 @@ bool gIsOpsLimit;
 
 // Global variables for auto-save functionality
 time_t gLastSaveTime = 0;
-const int AUTOSAVE_INTERVAL_SECONDS = 60; // 10 minutes
+const int AUTOSAVE_INTERVAL_SECONDS = 300; // 5 minutes
 
 bool SaveDatabase(const char* filename) {
     if (!filename || !filename[0]) return false;
