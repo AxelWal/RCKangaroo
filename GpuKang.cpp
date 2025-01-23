@@ -18,15 +18,32 @@ extern bool gGenMode; //tames generation mode
 
 int RCGpuKang::CalcKangCnt()
 {
-    // Query device properties for optimal configuration
+    // Query device properties
     cudaDeviceProp props;
     cudaGetDeviceProperties(&props, CudaIndex);
     
-    // Keep the original block sizes that were known to work
-    Kparams.BlockSize = IsOldGpu ? 512 : 256;
-    
-    // Adjust group count based on compute capability and multiprocessor count
-    Kparams.GroupCnt = IsOldGpu ? 64 : 24;
+    // Calculate optimal block and group sizes based on GPU architecture
+    if (!IsOldGpu) {
+        // Use warp-aligned block size for better memory coalescing
+        int maxWarpsPerSM = props.maxThreadsPerMultiProcessor / props.warpSize;
+        int optimalBlockSize = props.warpSize * 8;  // Use 8 warps per block
+        
+        // Ensure block size doesn't exceed device limits
+        Kparams.BlockSize = std::min(optimalBlockSize, props.maxThreadsPerBlock);
+        
+        // Calculate group count to maximize occupancy
+        int blocksPerSM = props.maxThreadsPerMultiProcessor / Kparams.BlockSize;
+        Kparams.GroupCnt = (props.multiProcessorCount * blocksPerSM * 2) / 3; // Use 2/3 of max blocks
+        
+        // Ensure we don't exceed reasonable limits
+        if (Kparams.GroupCnt > 32) {
+            Kparams.GroupCnt = 32;
+        }
+    } else {
+        // Keep original values for old GPUs
+        Kparams.BlockSize = 512;
+        Kparams.GroupCnt = 64;
+    }
     
     Kparams.BlockCnt = mpCnt;
     return Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
@@ -53,33 +70,70 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
     if (err != cudaSuccess)
         return false;
 
-    // Query device properties for optimal configuration
+    // Set device flags for optimal performance
+    err = cudaSetDeviceFlags(
+        cudaDeviceScheduleAuto |      // Let driver choose best scheduling
+        cudaDeviceMapHost |           // Enable zero-copy memory
+        cudaDeviceLmemResizeToMax     // Maximize local memory
+    );
+    if (err != cudaSuccess) {
+        printf("GPU %d, Failed to set device flags: %s\n", CudaIndex, cudaGetErrorString(err));
+        return false;
+    }
+
+    // Query device properties for optimization
     cudaDeviceProp props;
     cudaGetDeviceProperties(&props, CudaIndex);
     
-    // Keep the original block sizes that were known to work
-    Kparams.BlockCnt = mpCnt;
-    Kparams.BlockSize = IsOldGpu ? 512 : 256;
-    Kparams.GroupCnt = IsOldGpu ? 64 : 24;
+    // Optimize thread and block configuration
+    if (!IsOldGpu) {
+        // Use warp-aligned block size
+        int maxWarpsPerSM = props.maxThreadsPerMultiProcessor / props.warpSize;
+        int optimalBlockSize = props.warpSize * 8;
+        
+        Kparams.BlockSize = std::min(optimalBlockSize, props.maxThreadsPerBlock);
+        
+        // Calculate group count for optimal occupancy
+        int blocksPerSM = props.maxThreadsPerMultiProcessor / Kparams.BlockSize;
+        Kparams.GroupCnt = (props.multiProcessorCount * blocksPerSM * 2) / 3;
+        
+        if (Kparams.GroupCnt > 32) {
+            Kparams.GroupCnt = 32;
+        }
+    } else {
+        Kparams.BlockSize = 512;
+        Kparams.GroupCnt = 64;
+    }
     
+    Kparams.BlockCnt = mpCnt;
     KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
     Kparams.KangCnt = KangCnt;
     Kparams.DP = DP;
     
-    // Keep original kernel sizes but ensure alignment
-    Kparams.KernelA_LDS_Size = ((64 * JMP_CNT + 16 * Kparams.BlockSize + 31) / 32) * 32;
-    Kparams.KernelB_LDS_Size = ((64 * JMP_CNT + 31) / 32) * 32;
-    Kparams.KernelC_LDS_Size = ((96 * JMP_CNT + 31) / 32) * 32;
+    // Optimize memory alignment for coalesced access
+    int warpSize = props.warpSize;
+    const int memoryAlignment = warpSize * 4;  // Align to 128 bytes for coalesced access
+    
+    // Ensure kernel sizes are warp-aligned for better memory access
+    Kparams.KernelA_LDS_Size = ((64 * JMP_CNT + 16 * Kparams.BlockSize + memoryAlignment - 1) / memoryAlignment) * memoryAlignment;
+    Kparams.KernelB_LDS_Size = ((64 * JMP_CNT + memoryAlignment - 1) / memoryAlignment) * memoryAlignment;
+    Kparams.KernelC_LDS_Size = ((96 * JMP_CNT + memoryAlignment - 1) / memoryAlignment) * memoryAlignment;
     
     Kparams.IsGenMode = gGenMode;
 
-    //allocate gpu mem
+    // Allocate GPU memory with optimal alignment
     u64 size;
     if (!IsOldGpu)
     {
-        //L2 cache optimization with 256-byte alignment
-        int L2size = ((Kparams.KangCnt * (3 * 32) + 255) & ~255);
+        // Calculate optimal L2 cache size based on working set and warp size
+        size_t workingSetPerWarp = Kparams.BlockSize * sizeof(float) * 4;
+        int warpsPerBlock = Kparams.BlockSize / warpSize;
+        size_t totalWorkingSet = workingSetPerWarp * warpsPerBlock;
+        
+        // Align to cache line size
+        int L2size = ((Kparams.KangCnt * (3 * 32) + 127) & ~127);
         total_mem += L2size;
+        
         err = cudaMalloc((void**)&Kparams.L2, L2size);
         if (err != cudaSuccess)
         {
@@ -87,21 +141,22 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
             return false;
         }
         
-        // Use a more conservative L2 cache size
+        // Configure L2 cache for optimal throughput
         int l2CacheSize;
         cudaDeviceGetAttribute(&l2CacheSize, cudaDevAttrL2CacheSize, CudaIndex);
-        size = std::min((size_t)L2size, (size_t)l2CacheSize);
-        if (size > persistingL2CacheMaxSize)
-            size = persistingL2CacheMaxSize;
+        
+        // Use device's full L2 cache capacity if available
+        size = std::min(totalWorkingSet, (size_t)l2CacheSize);
         err = cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, size);
         
-        //persisting for L2
-        cudaStreamAttrValue stream_attribute;                                                   
+        // Configure stream for optimal cache usage
+        cudaStreamAttrValue stream_attribute;
         stream_attribute.accessPolicyWindow.base_ptr = Kparams.L2;
-        stream_attribute.accessPolicyWindow.num_bytes = size;										
-        stream_attribute.accessPolicyWindow.hitRatio = 1.0;                                     
-        stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;             
-        stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;  	
+        stream_attribute.accessPolicyWindow.num_bytes = size;
+        stream_attribute.accessPolicyWindow.hitRatio = 0.6;  // Lower hit ratio for better throughput
+        stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+        stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+        
         err = cudaStreamSetAttribute(NULL, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
         if (err != cudaSuccess)
         {
