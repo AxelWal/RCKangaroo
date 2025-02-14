@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "CUDA C++: Debug CudaBrainSecp",
+      "type": "cuda-gdb",
+      "request": "launch",
+      "program": "${workspaceFolder}/CudaBrainSecp",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "preLaunchTask": "make",
+      "miDebuggerPath": "/usr/local/cuda/bin/cuda-gdb"
+    },
+    {
+      "name": "CUDA C++: Attach",
+      "type": "cuda-gdb",
+      "request": "attach",
+      "program": "${workspaceFolder}/CudaBrainSecp",
+      "processId": "${command:pickProcess}",
+      "miDebuggerPath": "/usr/local/cuda/bin/cuda-gdb"
+    }
+  ]
+}
