@@ -695,8 +695,6 @@ int main(int argc, char* argv[])
 	printf("*                    RCKangaroo v3.0  (c) 2024 RetiredCoder                    *\r\n");
 	printf("********************************************************************************\r\n\r\n");
 
-	printf("This software is free and open-source: https://github.com/RetiredC\r\n");
-	printf("It demonstrates fast GPU implementation of SOTA Kangaroo method for solving ECDLP\r\n");
 
 #ifdef _WIN32
 	printf("Windows version\r\n");
