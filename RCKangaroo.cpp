@@ -31,6 +31,7 @@ EcInt Int_TameOffset;
 Ec ec;
 
 CriticalSection csAddPoints;
+CriticalSection csDatabase; // Add new critical section for database operations
 u8* pPntList;
 u8* pPntList2;
 volatile int PntIndex;
@@ -54,6 +55,51 @@ char gTamesFileName[1024];
 double gMax;
 bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
+
+// Global variables for auto-save functionality
+time_t gLastSaveTime = 0;
+const int AUTOSAVE_INTERVAL_SECONDS = 300; // 5 minutes
+
+bool SaveDatabase(const char* filename) {
+    if (!filename || !filename[0]) return false;
+    
+    // Create temporary filename by appending .tmp
+    char tempFilename[512];
+    snprintf(tempFilename, sizeof(tempFilename), "%s.tmp", filename);
+    
+    // Lock the database during save
+    csDatabase.Enter();
+    bool success = db.SaveToFile(tempFilename);
+    csDatabase.Leave();
+    
+    if (!success) {
+        return false;
+    }
+    
+    // Replace old file with new one
+    #ifdef _WIN32
+    // Windows requires the target file to be deleted first
+    remove(filename);
+    #endif
+    if (rename(tempFilename, filename) != 0) {
+        remove(tempFilename);
+        return false;
+    }
+    
+    return true;
+}
+
+void CheckAndAutoSave() {
+    if (!gTamesFileName[0] || IsBench || gGenMode) return;
+    
+    time_t currentTime = time(NULL);
+    if (currentTime - gLastSaveTime >= AUTOSAVE_INTERVAL_SECONDS) {
+        if (SaveDatabase(gTamesFileName)) {
+            gLastSaveTime = currentTime;
+            printf("\rDatabase auto-saved at %s", ctime(&currentTime));
+        }
+    }
+}
 
 #pragma pack(push, 1)
 struct DBRec
@@ -211,7 +257,11 @@ void CheckNewPoints()
 		memcpy(nrec.d, p + 16, 22);
 		nrec.type = gGenMode ? TAME : p[40];
 
+		// Lock database during modification
+		csDatabase.Enter();
 		DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
+		csDatabase.Leave();
+		
 		if (gGenMode)
 			continue;
 		if (pref)
@@ -452,6 +502,10 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	while (!gSolved)
 	{
 		CheckNewPoints();
+
+		// Check for auto-save
+		CheckAndAutoSave();
+
 		Sleep(10);
 		if (GetTickCount64() - tm_stats > 10 * 1000)
 		{
