@@ -4,7 +4,7 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "/usr/local/cuda-12.6/targets/x86_64-linux/include"
+                "/usr/local/cuda/targets/x86_64-linux/include"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",

@@ -2,10 +2,10 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "CUDA C++: Debug CudaBrainSecp",
+      "name": "CUDA C++: Debug rckangaroo",
       "type": "cuda-gdb",
       "request": "launch",
-      "program": "${workspaceFolder}/CudaBrainSecp",
+      "program": "${workspaceFolder}/rckangaroo",
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
@@ -17,7 +17,7 @@
       "name": "CUDA C++: Attach",
       "type": "cuda-gdb",
       "request": "attach",
-      "program": "${workspaceFolder}/CudaBrainSecp",
+      "program": "${workspaceFolder}/rckangaroo",
       "processId": "${command:pickProcess}",
       "miDebuggerPath": "/usr/local/cuda/bin/cuda-gdb"
     }
